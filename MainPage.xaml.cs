@@ -4,41 +4,87 @@ using System.Text.Json;
 
 namespace TCP_Messages;
 
-// Classe per rappresentare i dati di un bottone
+/// <summary>
+/// Represents a user-defined TCP command configuration,
+/// storing the connection target and the payload to transmit.
+/// </summary>
 public class TcpCommand
 {
-    public string Label { get; set; }
-    public string Ip { get; set; }
+    /// <summary>Display label shown on the command button.</summary>
+    public string Label { get; set; } = string.Empty;
+
+    /// <summary>Target IP address or hostname for the TCP connection.</summary>
+    public string Ip { get; set; } = string.Empty;
+
+    /// <summary>Target TCP port number.</summary>
     public int Port { get; set; }
-    public string Command { get; set; }
+
+    /// <summary>Raw string payload sent over the TCP stream.</summary>
+    public string Command { get; set; } = string.Empty;
 }
 
+/// <summary>
+/// Main page of the application. Allows users to create, edit, delete,
+/// and fire named TCP commands through a dynamically generated button interface.
+/// Commands are persisted across sessions via <see cref="Preferences"/>.
+/// </summary>
 public partial class MainPage : ContentPage
 {
+    // -------------------------------------------------------------------------
+    // State
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// In-memory collection of all currently saved TCP commands.
+    /// Kept in sync with persistent storage after every mutation.
+    /// </summary>
     private List<TcpCommand> _savedCommands = new();
 
+    // -------------------------------------------------------------------------
+    // Lifecycle
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Initialises the page, wires up XAML-generated controls,
+    /// and restores any previously persisted commands.
+    /// </summary>
     public MainPage()
     {
         InitializeComponent();
-        LoadCommands(); // Carica i bottoni all'avvio
+        LoadCommands();
     }
 
+    // -------------------------------------------------------------------------
+    // UI event handlers
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Toggles the visibility of the input panel used to add new commands.
+    /// </summary>
     private void OnTogglePanelClicked(object sender, EventArgs e)
     {
         InputPanel.IsVisible = !InputPanel.IsVisible;
     }
 
+    /// <summary>
+    /// Validates the user's input, creates a new <see cref="TcpCommand"/>,
+    /// persists it, and appends the corresponding button row to the UI.
+    /// </summary>
     private async void OnAddButtonClicked(object sender, EventArgs e)
     {
+        // Guard: all fields must be filled before proceeding.
         if (string.IsNullOrWhiteSpace(IpEntry.Text) ||
             string.IsNullOrWhiteSpace(PortEntry.Text) ||
             string.IsNullOrWhiteSpace(CommandEntry.Text) ||
             string.IsNullOrWhiteSpace(LabelEntry.Text))
+        {
             return;
+        }
 
+        // Guard: port must be a valid integer.
         if (!int.TryParse(PortEntry.Text, out int port))
         {
-            await this.DisplayAlertAsync("Errore", "Porta non valida", "OK");
+            await this.DisplayAlertAsync("Error", "Invalid port number.", "OK");
             return;
         }
 
@@ -54,90 +100,125 @@ public partial class MainPage : ContentPage
         SaveCommands();
         AddButtonToInterface(newCmd);
 
-        // Reset e chiusura pannello
-        LabelEntry.Text = CommandEntry.Text = string.Empty;
+        // Reset transient input fields and collapse the panel.
+        LabelEntry.Text = string.Empty;
+        CommandEntry.Text = string.Empty;
         InputPanel.IsVisible = false;
     }
 
+    // -------------------------------------------------------------------------
+    // Dynamic UI construction
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Builds a three-column button row for the given <paramref name="cmd"/>
+    /// and appends it to <c>ButtonsContainer</c>.
+    /// The row contains:
+    /// <list type="bullet">
+    ///   <item>A main action button that sends the TCP command.</item>
+    ///   <item>An edit button that pre-populates the input panel.</item>
+    ///   <item>A delete button that removes the command after confirmation.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="cmd">The command whose UI row should be created.</param>
     private void AddButtonToInterface(TcpCommand cmd)
     {
-        // Creiamo una griglia per la riga: una colonna larga per il comando, due strette per le icone
+        // Three-column layout: [action | edit | delete]
         var rowGrid = new Grid
         {
             ColumnDefinitions =
-        {
-            new ColumnDefinition { Width = GridLength.Star },
-            new ColumnDefinition { Width = GridLength.Auto },
-            new ColumnDefinition { Width = GridLength.Auto }
-        },
-            Margin = new Thickness(5, 5)
+            {
+                new ColumnDefinition { Width = GridLength.Star },
+                new ColumnDefinition { Width = GridLength.Auto },
+                new ColumnDefinition { Width = GridLength.Auto }
+            },
+            Margin = new Thickness(5)
         };
 
+        // --- Main action button -------------------------------------------
         var mainBtn = new Button
         {
             Text = cmd.Label,
             HorizontalOptions = LayoutOptions.Fill
         };
 
-        mainBtn.SetAppThemeColor(Button.BackgroundColorProperty, Colors.SlateGray, Color.FromArgb("#2B2B2B"));
-        mainBtn.SetAppThemeColor(Button.TextColorProperty, Colors.White, Colors.White);
+        // Respect the app's light/dark theme for the button colours.
+        mainBtn.SetAppThemeColor(Button.BackgroundColorProperty,
+            light: Colors.SlateGray,
+            dark: Color.FromArgb("#2B2B2B"));
+        mainBtn.SetAppThemeColor(Button.TextColorProperty,
+            light: Colors.White,
+            dark: Colors.White);
 
-        // Gestione del click con feedback
-        mainBtn.Clicked += async (s, e) =>
+        mainBtn.Clicked += async (_, _) =>
         {
-            mainBtn.IsEnabled = false; // Disabilita per evitare invii doppi
-            var originalColor = mainBtn.BackgroundColor;
+            // Disable the button for the duration of the operation to prevent
+            // multiple concurrent TCP calls to the same target.
+            mainBtn.IsEnabled = false;
 
-            bool success = await SendTcpCommand(cmd.Ip, cmd.Port, cmd.Command);
+            // Capture the current background colour before overwriting it so
+            // we can restore the original value afterwards.  BackgroundColor
+            // may be null when the button hasn't been rendered yet; fall back
+            // to transparent in that unlikely case.
+            Color originalColor = mainBtn.BackgroundColor ?? Colors.Transparent;
 
-            if (success)
-            {
-                mainBtn.BackgroundColor = Colors.Green;
-            }
-            else
-            {
-                mainBtn.BackgroundColor = Colors.Red;
-            }
+            (bool success, string? response) = await SendTcpCommandAsync(cmd.Ip, cmd.Port, cmd.Command);
 
-            // Aspetta 1.5 secondi e poi ripristina il colore originale
-            await Task.Delay(1500);
+            // Provide brief visual feedback: green on success, red on failure.
+            mainBtn.BackgroundColor = success ? Colors.Green : Colors.Red;
+            await Task.Delay(TimeSpan.FromMilliseconds(1500));
+
             mainBtn.BackgroundColor = originalColor;
             mainBtn.IsEnabled = true;
+
+            // Show the server's response (or a failure notice) in a dialog.
+            // When the call succeeded but the server sent no data, report that
+            // explicitly rather than displaying an empty alert body.
+            string alertTitle = success ? "Response" : "Error";
+            string alertBody = success
+                ? (string.IsNullOrWhiteSpace(response) ? "(no response from server)" : response)
+                : "The command could not be delivered. Check the connection settings.";
+
+            await this.DisplayAlertAsync(alertTitle, alertBody, "OK");
         };
 
-        // 2. Bottone Modifica
+        // --- Edit button --------------------------------------------------
         var editBtn = new Button
         {
-            Text = "✎", // Icona o testo breve
+            Text = "✎",
             FontAttributes = FontAttributes.Bold,
             BackgroundColor = Colors.Orange,
             TextColor = Colors.White,
             WidthRequest = 45,
             Margin = new Thickness(5, 0)
         };
-        editBtn.Clicked += (s, e) => PrepareEdit(cmd, rowGrid);
+        editBtn.Clicked += (_, _) => PrepareEdit(cmd, rowGrid);
 
-        // 3. Bottone Elimina
+        // --- Delete button ------------------------------------------------
         var deleteBtn = new Button
         {
-            Text = "X",
+            Text = "✕",
             FontAttributes = FontAttributes.Bold,
             BackgroundColor = Colors.Red,
             TextColor = Colors.White,
             WidthRequest = 45
         };
-        deleteBtn.Clicked += async (s, e) =>
+        deleteBtn.Clicked += async (_, _) =>
         {
-            bool confirm = await this.DisplayAlertAsync("Conferma", $"Vuoi eliminare {cmd.Label}?", "Sì", "No");
-            if (confirm)
-            {
-                _savedCommands.Remove(cmd);
-                SaveCommands();
-                ButtonsContainer.Children.Remove(rowGrid);
-            }
+            bool confirmed = await this.DisplayAlertAsync(
+                "Confirm deletion",
+                $"Do you want to remove \"{cmd.Label}\"?",
+                "Yes", "No");
+
+            if (!confirmed)
+                return;
+
+            _savedCommands.Remove(cmd);
+            SaveCommands();
+            ButtonsContainer.Children.Remove(rowGrid);
         };
 
-        // Aggiungiamo i controlli alla griglia nelle rispettive colonne
+        // Assign controls to grid columns.
         Grid.SetColumn(mainBtn, 0);
         Grid.SetColumn(editBtn, 1);
         Grid.SetColumn(deleteBtn, 2);
@@ -149,7 +230,14 @@ public partial class MainPage : ContentPage
         ButtonsContainer.Children.Add(rowGrid);
     }
 
-    // Funzione per caricare i dati nel pannello superiore per la modifica
+    /// <summary>
+    /// Populates the input panel with the values of an existing command so the
+    /// user can modify them, then removes the old row from the UI and its
+    /// backing data so that <see cref="OnAddButtonClicked"/> will re-create
+    /// it cleanly when the user saves.
+    /// </summary>
+    /// <param name="cmd">Command whose data should be loaded into the form.</param>
+    /// <param name="rowToRemove">The grid row associated with <paramref name="cmd"/>.</param>
     private void PrepareEdit(TcpCommand cmd, Grid rowToRemove)
     {
         LabelEntry.Text = cmd.Label;
@@ -157,55 +245,93 @@ public partial class MainPage : ContentPage
         PortEntry.Text = cmd.Port.ToString();
         CommandEntry.Text = cmd.Command;
 
-        // Rimuoviamo il vecchio record (verrà salvato come nuovo al click su "Salva")
+        // Remove the existing entry so it is not duplicated when saved again.
         _savedCommands.Remove(cmd);
         ButtonsContainer.Children.Remove(rowToRemove);
 
-        // Apriamo il pannello
         InputPanel.IsVisible = true;
     }
 
-    private async Task<bool> SendTcpCommand(string ip, int port, string command)
+    // -------------------------------------------------------------------------
+    // Networking
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Opens a TCP connection to the specified host and port, transmits
+    /// <paramref name="command"/> terminated by a newline character, and
+    /// awaits a single-line response.  The entire operation is bounded by a
+    /// five-second cancellation timeout.
+    /// </summary>
+    /// <param name="ip">Target IP address or hostname.</param>
+    /// <param name="port">Target TCP port number.</param>
+    /// <param name="command">Payload string to transmit (LF appended automatically).</param>
+    /// <returns>
+    /// A tuple where <c>Success</c> is <see langword="true"/> when the round-trip
+    /// completed without error, and <c>Response</c> contains the first line
+    /// returned by the remote host, or <see langword="null"/> if the stream
+    /// closed before a newline was received or an error occurred.
+    /// </returns>
+    private static async Task<(bool Success, string? Response)> SendTcpCommandAsync(
+        string ip, int port, string command)
     {
         try
         {
-            using TcpClient client = new TcpClient();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var client = new TcpClient();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
             await client.ConnectAsync(ip, port, cts.Token);
 
-            using NetworkStream stream = client.GetStream();
-            byte[] data = Encoding.UTF8.GetBytes(command + "\n");
+            await using NetworkStream stream = client.GetStream();
 
-            await stream.WriteAsync(data, 0, data.Length, cts.Token);
+            byte[] payload = Encoding.UTF8.GetBytes(command + "\n");
+            await stream.WriteAsync(payload, cts.Token);
             await stream.FlushAsync(cts.Token);
 
-            return true; // Tutto ok
+            // ReadLineAsync returns null when the stream reaches EOF before a
+            // newline; we still consider the operation successful since the
+            // command was transmitted, and surface null to the caller as-is.
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            string? response = await reader.ReadLineAsync(cts.Token);
+
+            return (true, response);
         }
         catch (Exception ex)
         {
-            // Logghiamo l'errore ma restituiamo false per il feedback visivo
-            System.Diagnostics.Debug.WriteLine($"Errore TCP: {ex.Message}");
-            return false;
+            System.Diagnostics.Debug.WriteLine($"[TCP] Error: {ex.Message}");
+            return (false, null);
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Persistence
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Serialises the current command list to JSON and writes it to
+    /// <see cref="Preferences"/> under a fixed key.
+    /// </summary>
     private void SaveCommands()
     {
         string json = JsonSerializer.Serialize(_savedCommands);
         Preferences.Default.Set("saved_tcp_commands", json);
     }
 
+    /// <summary>
+    /// Reads the previously persisted JSON from <see cref="Preferences"/>,
+    /// deserialises it, and rebuilds the button interface for each command.
+    /// If no data is found, or deserialisation fails, the list remains empty.
+    /// </summary>
     private void LoadCommands()
     {
         string json = Preferences.Default.Get("saved_tcp_commands", string.Empty);
-        if (!string.IsNullOrEmpty(json))
-        {
-            _savedCommands = JsonSerializer.Deserialize<List<TcpCommand>>(json) ?? new();
-            foreach (var cmd in _savedCommands)
-            {
-                AddButtonToInterface(cmd);
-            }
-        }
+
+        if (string.IsNullOrEmpty(json))
+            return;
+
+        // Deserialise defensively; null result is treated as an empty list.
+        _savedCommands = JsonSerializer.Deserialize<List<TcpCommand>>(json) ?? new List<TcpCommand>();
+
+        foreach (TcpCommand cmd in _savedCommands)
+            AddButtonToInterface(cmd);
     }
 }
