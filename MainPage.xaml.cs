@@ -10,6 +10,13 @@ namespace TCP_Messages;
 /// </summary>
 public class TcpCommand
 {
+    /// <summary>
+    /// Stable identifier used to correlate this command with its corresponding
+    /// <see cref="Microsoft.Maui.ApplicationModel.AppAction"/>.
+    /// Generated once at creation time and persisted alongside the command.
+    /// </summary>
+    public string Id { get; set; } = Guid.NewGuid().ToString();
+
     /// <summary>Display label shown on the command button.</summary>
     public string Label { get; set; } = string.Empty;
 
@@ -40,6 +47,13 @@ public partial class MainPage : ContentPage
     /// </summary>
     private List<TcpCommand> _savedCommands = new();
 
+    /// <summary>
+    /// Set of <see cref="TcpCommand.Id"/> values whose commands have been
+    /// pinned as home-screen shortcuts via <see cref="AppActions"/>.
+    /// Persisted separately from the command list.
+    /// </summary>
+    private HashSet<string> _pinnedIds = new();
+
     // -------------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------------
@@ -51,7 +65,13 @@ public partial class MainPage : ContentPage
     public MainPage()
     {
         InitializeComponent();
+        LoadPinnedIds();
         LoadCommands();
+
+        // Subscribe to the static AppActions event so that tapping a
+        // home-screen shortcut while the app is running fires the TCP command
+        // immediately, without the user having to navigate back to this page.
+        AppActions.OnAppAction += OnAppActionActivated;
     }
 
     // -------------------------------------------------------------------------
@@ -61,7 +81,7 @@ public partial class MainPage : ContentPage
     /// <summary>
     /// Toggles the visibility of the input panel used to add new commands.
     /// </summary>
-    private void OnTogglePanelClicked(object sender, EventArgs e)
+    private void OnTogglePanelClicked(object? sender, EventArgs? e)
     {
         InputPanel.IsVisible = !InputPanel.IsVisible;
     }
@@ -70,7 +90,7 @@ public partial class MainPage : ContentPage
     /// Validates the user's input, creates a new <see cref="TcpCommand"/>,
     /// persists it, and appends the corresponding button row to the UI.
     /// </summary>
-    private async void OnAddButtonClicked(object sender, EventArgs e)
+    private async void OnAddButtonClicked(object? sender, EventArgs? e)
     {
         // Guard: all fields must be filled before proceeding.
         if (string.IsNullOrWhiteSpace(IpEntry.Text) ||
@@ -123,12 +143,13 @@ public partial class MainPage : ContentPage
     /// <param name="cmd">The command whose UI row should be created.</param>
     private void AddButtonToInterface(TcpCommand cmd)
     {
-        // Three-column layout: [action | edit | delete]
+        // Four-column layout: [action | edit | pin | delete]
         var rowGrid = new Grid
         {
             ColumnDefinitions =
             {
                 new ColumnDefinition { Width = GridLength.Star },
+                new ColumnDefinition { Width = GridLength.Auto },
                 new ColumnDefinition { Width = GridLength.Auto },
                 new ColumnDefinition { Width = GridLength.Auto }
             },
@@ -194,6 +215,26 @@ public partial class MainPage : ContentPage
         };
         editBtn.Clicked += (_, _) => PrepareEdit(cmd, rowGrid);
 
+        // --- Pin button ---------------------------------------------------
+        // Reflects whether the command is currently registered as a
+        // home-screen shortcut.  Appearance updates on every toggle.
+        bool isPinned = _pinnedIds.Contains(cmd.Id);
+        var pinBtn = new Button
+        {
+            Text = isPinned ? "★" : "☆",
+            FontAttributes = FontAttributes.Bold,
+            BackgroundColor = isPinned ? Colors.SteelBlue : Colors.Gray,
+            TextColor = Colors.White,
+            WidthRequest = 45,
+            Margin = new Thickness(5, 0)
+        };
+        pinBtn.Clicked += async (_, _) =>
+        {
+            pinBtn.IsEnabled = false;
+            await ToggleAppActionAsync(cmd, pinBtn);
+            pinBtn.IsEnabled = true;
+        };
+
         // --- Delete button ------------------------------------------------
         var deleteBtn = new Button
         {
@@ -213,6 +254,13 @@ public partial class MainPage : ContentPage
             if (!confirmed)
                 return;
 
+            // Also remove any associated home-screen shortcut.
+            if (_pinnedIds.Remove(cmd.Id))
+            {
+                SavePinnedIds();
+                await SyncAppActionsAsync();
+            }
+
             _savedCommands.Remove(cmd);
             SaveCommands();
             ButtonsContainer.Children.Remove(rowGrid);
@@ -221,10 +269,12 @@ public partial class MainPage : ContentPage
         // Assign controls to grid columns.
         Grid.SetColumn(mainBtn, 0);
         Grid.SetColumn(editBtn, 1);
-        Grid.SetColumn(deleteBtn, 2);
+        Grid.SetColumn(pinBtn, 2);
+        Grid.SetColumn(deleteBtn, 3);
 
         rowGrid.Children.Add(mainBtn);
         rowGrid.Children.Add(editBtn);
+        rowGrid.Children.Add(pinBtn);
         rowGrid.Children.Add(deleteBtn);
 
         ButtonsContainer.Children.Add(rowGrid);
@@ -303,8 +353,160 @@ public partial class MainPage : ContentPage
     }
 
     // -------------------------------------------------------------------------
+    // App Actions (home-screen shortcuts)
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Toggles the home-screen shortcut for <paramref name="cmd"/>: pins it if
+    /// it is not currently registered, or unpins it if it is.
+    /// Updates <paramref name="pinBtn"/>'s appearance to reflect the new state.
+    /// </summary>
+    /// <param name="cmd">The TCP command to pin or unpin.</param>
+    /// <param name="pinBtn">The button whose visual state must be refreshed.</param>
+    private async Task ToggleAppActionAsync(TcpCommand cmd, Button pinBtn)
+    {
+        if (!AppActions.Current.IsSupported)
+        {
+            await this.DisplayAlertAsync(
+                "Not supported",
+                "Home-screen shortcuts are not available on this device.",
+                "OK");
+            return;
+        }
+
+        bool nowPinned;
+
+        if (_pinnedIds.Contains(cmd.Id))
+        {
+            _pinnedIds.Remove(cmd.Id);
+            nowPinned = false;
+        }
+        else
+        {
+            _pinnedIds.Add(cmd.Id);
+            nowPinned = true;
+        }
+
+        SavePinnedIds();
+        await SyncAppActionsAsync();
+
+        // Refresh the button to match the new pinned state.
+        pinBtn.Text = nowPinned ? "★" : "☆";
+        pinBtn.BackgroundColor = nowPinned ? Colors.SteelBlue : Colors.Gray;
+    }
+
+    /// <summary>
+    /// Rebuilds the full set of registered <see cref="AppAction"/> items from
+    /// the commands whose IDs are present in <see cref="_pinnedIds"/>.
+    /// Any command that no longer exists is silently skipped.
+    /// </summary>
+    private async Task SyncAppActionsAsync()
+    {
+        if (!AppActions.Current.IsSupported)
+            return;
+
+        try
+        {
+            IEnumerable<AppAction> actions = _savedCommands
+                .Where(c => _pinnedIds.Contains(c.Id))
+                .Select(c => new AppAction(c.Id, c.Label, icon: "shortcut_square"));
+
+            await AppActions.Current.SetAsync(actions);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[AppActions] Sync error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Invoked when the user activates a home-screen shortcut, either while
+    /// the app is already running or immediately after it is brought to the
+    /// foreground.  Finds the matching command and fires it over TCP.
+    /// </summary>
+    private async void OnAppActionActivated(object? sender, AppActionEventArgs e)
+    {
+        TcpCommand? cmd = _savedCommands.FirstOrDefault(c => c.Id == e.AppAction.Id);
+
+        if (cmd is null)
+            return;
+
+        // Ensure UI interactions happen on the main thread.
+        await MainThread.InvokeOnMainThreadAsync(async () =>
+        {
+            (bool success, string? response) =
+                await SendTcpCommandAsync(cmd.Ip, cmd.Port, cmd.Command);
+
+            string alertTitle = success ? "Response" : "Error";
+            string alertBody = success
+                ? (string.IsNullOrWhiteSpace(response) ? "(no response from server)" : response)
+                : "The command could not be delivered. Check the connection settings.";
+
+            await this.DisplayAlertAsync(alertTitle, alertBody, "OK");
+        });
+    }
+
+    /// <summary>
+    /// Metodo chiamato dall'esterno (App.xaml.cs) quando viene attivata 
+    /// una scorciatoia dalla Home.
+    /// </summary>
+    public void HandleExternalAction(string actionId)
+    {
+        if (_savedCommands.Count == 0)
+        {
+            LoadCommands();
+        }
+
+        // Cerchiamo se esiste un comando salvato con quell'ID
+        TcpCommand? cmd = _savedCommands.FirstOrDefault(c => c.Id == actionId);
+
+        if (cmd is null)
+            return;
+
+        // Eseguiamo il comando sulla UI Thread
+        MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            (bool success, string? response) = await SendTcpCommandAsync(cmd.Ip, cmd.Port, cmd.Command);
+
+            /*string alertTitle = success ? "Risposta CLOE" : "Errore";
+            string alertBody = success
+                ? (string.IsNullOrWhiteSpace(response) ? "(nessuna risposta)" : response)
+                : "Comando non inviato. Verifica la connessione.";
+
+            await this.DisplayAlertAsync(alertTitle, alertBody, "OK");*/
+        });
+    }
+
+
+    // -------------------------------------------------------------------------
     // Persistence
     // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Serialises the set of pinned command IDs to JSON and writes it to
+    /// <see cref="Preferences"/> under a fixed key.
+    /// </summary>
+    private void SavePinnedIds()
+    {
+        string json = JsonSerializer.Serialize(_pinnedIds);
+        Preferences.Default.Set("pinned_command_ids", json);
+    }
+
+    /// <summary>
+    /// Restores the set of pinned command IDs from <see cref="Preferences"/>.
+    /// Must be called before <see cref="LoadCommands"/> so that pin button
+    /// states are correct when the UI is first built.
+    /// </summary>
+    private void LoadPinnedIds()
+    {
+        string json = Preferences.Default.Get("pinned_command_ids", string.Empty);
+
+        if (string.IsNullOrEmpty(json))
+            return;
+
+        _pinnedIds = JsonSerializer.Deserialize<HashSet<string>>(json) ?? new HashSet<string>();
+    }
+
 
     /// <summary>
     /// Serialises the current command list to JSON and writes it to

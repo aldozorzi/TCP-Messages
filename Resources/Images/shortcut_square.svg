@@ -1,0 +1,13 @@
+<svg width="512" height="512" xmlns="http://www.w3.org/2000/svg">
+ <g>
+  <title>Layer 1</title>
+  <g id="svg_1" fill="white">
+   <path id="svg_2" d="m183.57143,92.85714l-66.57143,158.85714l70,0l-34.85714,122.28571l131.42857,-164.57143l-88.57143,-0.57143l47.14286,-116l-58.57143,0l0,0.00001z"/>
+   <path id="svg_3" stroke-linecap="round" fill="none" stroke-width="20" stroke="white" d="m313.57143,183.42857q40,66 0,132"/>
+   <path id="svg_4" stroke-linecap="round" fill="none" stroke-width="20" stroke="white" d="m348.57143,153.42857q55,96 0,192"/>
+   <path id="svg_5" stroke-linecap="round" fill="none" stroke-width="20" stroke="white" d="m383.57143,123.42857q70,126 0,252"/>
+  </g>
+  <rect rx="20" stroke-width="25" id="svg_6" height="233" width="233" y="139.5" x="139.5" stroke="#512bd4" fill="#512bd4"/>
+ </g>
+
+</svg>
