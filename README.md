@@ -25,9 +25,13 @@ A lightweight .NET MAUI application designed to send TCP commands to remote devi
 
 ### How It Works
 
-1.  **Add a Command**: Open the input panel and specify a Label, IP Address, Port, and the Command string.
-2.  **Send**: Tap the generated button. The app attempts a socket connection and sends the data.
-3.  **Manage**: Use the edit (✎) or delete (X) buttons to modify your dashboard on the fly.
+1. **Add a Command**: Open the input panel and specify a Label, IP Address, Port, and the Command string.
+2. **Send**: Tap the command button. The app establishes a direct TCP socket connection, sends the payload (auto-terminating with a newline), and displays the server's response.
+3. **Manage**: Use the edit (✎) or delete (✕) buttons to modify your dashboard on the fly.
+4. **Quick Access (App Actions)**: 
+    * Tap the **Star (☆)** icon to pin a command to your device's Home Screen.
+    * To use it: find the app icon in your drawer, **long-press** it, and your command will appear in the shortcut menu.
+    * **Pro Tip**: You can drag these shortcuts directly onto your Home screen for one-tap execution.
 
 ---
 
